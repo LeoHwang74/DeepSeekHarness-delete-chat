@@ -1,5 +1,7 @@
 # dsh-delete-chat
 
+中文（本页默认语言） · [English](#english)
+
 给 DeepSeek Harness（DSH）的会话列表加一个「**删除会话**」动作：在某一行的「⋯」菜单或右键菜单里点它，确认后把这次对话连同它的磁盘日志一起移出列表，推进 `$DSH_HOME/session-trash/<时间戳>/`，可以随时从磁盘捡回来。
 
 DSH 本身只有「归档」——归档只是把会话藏起来，日志还在。本插件补的是真正意义上的删除，同时保留了可恢复性。
@@ -99,3 +101,109 @@ node --test test/delete-session.test.mjs test/host-smoke.test.mjs
 ## License
 
 MIT，见 [LICENSE](LICENSE)。
+
+---
+
+## English
+
+Adds a **Delete conversation** action to the DeepSeek Harness (DSH) session list: pick it from a row's `⋯` menu or the context menu, confirm, and the conversation plus its on-disk log leaves the list — moved into `$DSH_HOME/session-trash/<timestamp>/`, where you can always pick it back up.
+
+DSH ships **Archive** only, and archiving just hides a session while its log stays on disk. This plugin does the actual deletion without giving up recoverability.
+
+### Why not another offline script
+
+The old `dsh-delete-chat.bat` next to it demanded a **full quit** of DSH first; otherwise the in-memory session registry and the disk file would overwrite each other. The point of the plugin is to move the same semantics into the runtime: no quitting, no admin rights, and the row disappears the moment the delete succeeds.
+
+### What you will see
+
+- Placement: the `⋯` button at the end of a session row and the right-click menu both render from the same `contextMenu` family, so the action looks exactly like the built-ins.
+- Order: `order: 700`, right after the built-in Archive (600), with `separatorBefore: true` + `danger: true` so the risky action sits in its own group.
+- Confirm: a native confirmation dialog first, stating that the session moves into session-trash and remains recoverable from disk.
+- Result: the list re-baselines, the row disappears, and a success toast appears; deleting an already-gone session is not treated as an error.
+- Refusal: a session still in use (its Agent is alive) gets an explicit refusal plus the next step, and nothing on disk is touched.
+
+### Layout
+
+```
+dsh-delete-chat/
+├─ package.json         # dsh.bundle.patch + dsh.client (the web half and its dependency packages)
+├─ cordis.patch.yml     # inserts one `dsh-delete-chat` row into the profile
+├─ index.js             # host half: wires endpoints, checks liveness, registers routes
+├─ lib/
+│  ├─ routes.js         # request validation, error-to-HTTP mapping, the diagnostic endpoint
+│  └─ delete-session.js # pure file logic: locate, rename, cache cleanup, trash layout
+├─ client.js            # browser half: registers the menu, confirms, calls the endpoint, refreshes the list
+├─ install.ps1 / uninstall.ps1
+└─ test/                # node --test, 15 cases
+```
+
+There is exactly one data flow:
+
+```
+session row menu (client.js)
+  → POST /x-dsh-delete-chat/delete   { sessionId }
+    → host checks liveness (ctx.sessions.get)
+    → locate <home>/sessions/<slot>/<sessionId>
+    → rename to <home>/session-trash/<stamp>/<slot>/<sessionId> (cp+rm across volumes)
+    → delete <home>/storages/session_projcache/sessions/<sessionId>.json
+  ← { ok, mode, removed, alreadyGone }
+→ ctx.sessions.refresh() → row disappears → contextMenus.notify
+```
+
+### Design decisions
+
+1. **No `workspace.json` writes.** A workspace entity's `sessionIds` getter filters by the session header index (`candidateMatches`), so once the log is gone the id drops out of the membership list by itself; leftover ids in the archived set are explicitly tolerated by `unarchiveSession`. Conversely, rewriting a live registry file from another process fights its in-memory state — which is exactly why the old bat script required quitting DSH.
+2. **Cold sessions only.** A live session's directory is held by the Agent's write handle; on Windows the rename either fails or the in-memory log diverges from disk after the delete. Rather than choreographing "stop, wait, delete", the plugin refuses clearly and tells you the next step (switch away / archive).
+3. **Directory rename, not per-file unlink.** One atomic operation makes the session disappear, and it keeps implementation details such as `session.lock` and zstd-framed logs intact; the trash layout matches the bat script, so the two are interchangeable.
+4. **The projection cache goes with it.** List rows carry `sessionListMetadata` projection hints, and a stale cache makes the sidebar flash a ghost row.
+5. **The browser never touches the filesystem.** Path validation, DSH_HOME resolution and the rename all live in the host; the browser only sends an id. Routes hang off `ctx.connection.fetch`, reusing DSH's browser authentication and trust boundary.
+6. **Id whitelist.** `session-[A-Za-z0-9][A-Za-z0-9._-]{0,128}`, re-checked against the actual directory name, so nothing like `../` gets through.
+
+### Configuration
+
+| Field | Default | Meaning |
+|---|---|---|
+| `home` | `$DSH_HOME` → `~/.dsh` | The DSH user directory; only decides which store gets pruned |
+| `mode` | `trash` | `trash` moves to the trash folder; `permanent` deletes outright |
+
+Write a `config` block on the `delete-chat` row in the profile's `cordis.patch.yml`.
+
+### Install
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Under the hood it is the official `dsh plugin --profile desktop add link:<this dir>`, which links the package into the profile's `node_modules` and appends `dsh-delete-chat` to `dsh.profile.bundles`. **Fully quit** DSH afterwards, then reopen it.
+
+To uninstall: `.\uninstall.ps1` (removes the package and the bundle entry; the trash contents are left alone).
+
+### Verification
+
+```powershell
+node --check client.js; node --check index.js
+node --test test/delete-session.test.mjs test/host-smoke.test.mjs
+```
+
+Current state:
+
+- 15 tests green: id whitelist, both trash and permanent modes, idempotent re-delete, invalid id, missing home, configuration precedence, HTTP 400/409 mapping, the diagnostic endpoint.
+- The host tests use real `Request`/`Response` objects and real temp directories; only Cordis's `effect`/`connection`/`sessions` are stubbed.
+- Composition check: copying the desktop profile to `desktop-verify` and running `dsh --profile desktop-verify --dump-config` prints
+  `# == dsh-delete-chat` / `- id: delete-chat` / `name: dsh-delete-chat`, which means the loader expanded the bundle patch correctly.
+
+Not verified: the click-through flow in the real desktop app (someone has to press that Confirm button), and the retry experience on Windows when the session directory is still briefly held open.
+
+### Known limitations
+
+- The current session cannot be deleted: it is live. Switch to another session, or archive it first.
+- The confirmation uses `window.confirm`: serviceable, but not the DSH Modal family; a slot-based dialog can replace it later.
+- There is no UI over the trash: recovery means moving the directory back into `sessions/<slot>/` by hand. A `list-trash` / `restore` endpoint would be enough for a UI, and the trash layout already allows it.
+- Only the jsonl persistence backend is covered (the current desktop default). Switching backends means changing the location logic in `delete-session.js`.
+- Deleting a subagent session may leave a subagent directory row in the parent for a moment, until the next list baseline.
+
+### License
+
+MIT, see [LICENSE](LICENSE).
+
+[↑ 中文](#dsh-delete-chat)
