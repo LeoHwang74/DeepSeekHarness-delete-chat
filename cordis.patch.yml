@@ -1,0 +1,10 @@
+# dsh-delete-chat bundle patch — 把「删除会话」这一行插进当前 profile。
+#
+# 与官方 bundle patch 同格式：顶层是 loader patch 条目数组，`insert` 在 profile 根上追加插件行。
+# name 必须是 loader 能从 profile 的 node_modules 解析到的模块 id，即本包自身的包名。
+#
+# 只插入一行：Host 半边注册两个浏览器端点（删除、诊断），客户端半边（package.json 的
+# dsh.client）在会话菜单里追加「删除会话」。
+- insert:
+    - id: delete-chat
+      name: dsh-delete-chat
