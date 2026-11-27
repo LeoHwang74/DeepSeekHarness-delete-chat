@@ -9,7 +9,7 @@
  * 裸包名解析不到随 DSH 发布的 `@deepseek-ai/*`，因此这里只 import 相对路径与 node 内置模块。
  */
 import { createRouteHandlers, ROUTE_PREFIX } from './lib/routes.js'
-import { resolveDshHome } from './lib/delete-session.js'
+import { DEFAULT_MODE, resolveDshHome } from './lib/delete-session.js'
 
 /** 插件名，loader 诊断用。 */
 export const name = 'delete-chat'
@@ -17,20 +17,23 @@ export const name = 'delete-chat'
 /** 硬依赖：会话服务决定「还能不能删」，没有它不许半挂载。 */
 export const inject = ['connection', 'sessions']
 
-/** 默认删除模式：移入 `$DSH_HOME/session-trash/<时间戳>/`，可手工恢复。 */
-export const DEFAULT_MODE = 'trash'
+/** 默认删除模式（Windows 进系统回收站）；见 lib/delete-session.js 的 `DEFAULT_MODE`。 */
+export { DEFAULT_MODE }
+
+/** 允许的删除模式；配置写错时退回默认值，而不是把未知值一路传到文件操作里。 */
+const MODES = new Set(['recycle', 'trash', 'permanent'])
 
 /**
  * 读取一行配置。
  * @param {unknown} config - loader 传入的配置。
- * @returns {{ home: () => string, mode: () => 'trash' | 'permanent' }} 归一化后的访问器。
+ * @returns {{ home: () => string, mode: () => 'recycle' | 'trash' | 'permanent' }} 归一化后的访问器。
  */
 function settings(config) {
   const options = config !== null && typeof config === 'object' ? config : {}
   return {
     // 每次请求现读：loader 改本行配置会重挂插件，但现读让值永远不滞后。
     home: () => resolveDshHome(typeof options.home === 'string' ? options.home : undefined),
-    mode: () => (options.mode === 'permanent' ? 'permanent' : DEFAULT_MODE),
+    mode: () => (typeof options.mode === 'string' && MODES.has(options.mode) ? options.mode : DEFAULT_MODE),
   }
 }
 

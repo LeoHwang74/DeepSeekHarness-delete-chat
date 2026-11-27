@@ -1,8 +1,8 @@
 {
   "name": "dsh-delete-chat",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Adds a Delete conversation action to DeepSeek Harness: a session-row menu entry that moves the session log into $DSH_HOME/session-trash.",
+  "description": "Adds a Delete conversation action to DeepSeek Harness: a session-row menu entry that moves the whole session folder into the Windows Recycle Bin (configurable to $DSH_HOME/session-trash).",
   "type": "module",
   "main": "./index.js",
   "exports": {
@@ -15,7 +15,8 @@
     "lib",
     "client.js",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "docs"
   ],
   "dsh": {
     "bundle": {

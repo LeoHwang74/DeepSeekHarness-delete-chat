@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { purgeRecycled } from './purge-bin.mjs'
 import { apply, inject as declaredInject, name as pluginName } from '../index.js'
 
 const SLOT = '--G-~6211~7684~6587~6863-workspace--'
@@ -11,9 +13,10 @@ const ID = 'session-9bd8a45d-a883-4919-8b4f-150449bf9da0'
 
 /**
  * 用最小的 Cordis 形状装配插件：effect 立即执行并登记 disposer，connection 收集路由。
+ * 默认配置成 trash，避免测试真的往系统回收站里塞临时目录；回收站路径另有专门的用例。
  * @param {{ home: string, live?: string[], config?: Record<string, unknown> }} options 装配参数。
  */
-function mount({ home, live = [], config }) {
+function mount({ home, live = [], config = { mode: 'trash' } }) {
   const routes = []
   const ctx = {
     sessions: { get: (id) => (live.includes(id) ? { id } : undefined) },
@@ -36,7 +39,7 @@ async function fakeHome() {
 
 /** 发一次删除请求。 */
 async function callDelete(route, body) {
-  const response = await route.fetch(new Request('http://host/x-dsh-delete-chat/delete', {
+  const response = await route.fetch(new Request('http://host/api/x-dsh-delete-chat/delete', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: typeof body === 'string' ? body : JSON.stringify(body),
@@ -52,8 +55,11 @@ test('插件声明 name 与硬依赖', () => {
 test('apply 注册删除与诊断两条浏览器端点', async () => {
   const home = await fakeHome()
   const routes = mount({ home })
-  assert.deepEqual(routes.map(route => route.path), ['/x-dsh-delete-chat/delete', '/x-dsh-delete-chat/status'])
+  assert.deepEqual(routes.map(route => route.path), ['/api/x-dsh-delete-chat/delete', '/api/x-dsh-delete-chat/status'])
   assert.deepEqual(routes.map(route => route.methods), [['POST'], ['GET']])
+  // 精确路由必须在共享 /api 通道下：connection 用 endpointFromPath('/api', path) 校验，
+  // 前缀写错会让整个宿主半边 apply 失败（浏览器只剩 404），这里锁住这条约束。
+  for (const route of routes) assert.match(route.path, /^\/api\/[A-Za-z0-9_$.-]+(\/[A-Za-z0-9_$.-]+)*$/)
   await rm(home, { recursive: true, force: true })
 })
 
@@ -107,11 +113,30 @@ test('配置成 permanent 时走永久删除', async () => {
   await rm(home, { recursive: true, force: true })
 })
 
+test('recycle 模式把会话目录交给系统回收站', { skip: process.platform !== 'win32' }, async () => {
+  const home = await fakeHome()
+  // 每次运行都用新 id：回收站里不会和真实会话或上次运行的残留撞名。
+  const id = `session-${randomUUID()}`
+  await mkdir(join(home, 'sessions', SLOT, id), { recursive: true })
+  await writeFile(join(home, 'sessions', SLOT, id, 'session.v1.jsonl.zstd'), 'x')
+  try {
+    const [route] = mount({ home, config: { mode: 'recycle' } })
+    const result = await callDelete(route, { sessionId: id })
+    assert.equal(result.status, 200)
+    assert.equal(result.body.ok, true)
+    assert.equal(result.body.mode, 'recycle')
+    await assert.rejects(stat(join(home, 'sessions', SLOT, id)), { code: 'ENOENT' })
+  } finally {
+    await purgeRecycled(id)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('诊断端点报告 home、模式与目标位置', async () => {
   const home = await fakeHome()
   const routes = mount({ home })
   const status = routes[1]
-  const response = await status.fetch(new Request(`http://host/x-dsh-delete-chat/status?sessionId=${ID}`))
+  const response = await status.fetch(new Request(`http://host/api/x-dsh-delete-chat/status?sessionId=${ID}`))
   const body = await response.json()
   assert.equal(body.ok, true)
   assert.equal(body.mode, 'trash')

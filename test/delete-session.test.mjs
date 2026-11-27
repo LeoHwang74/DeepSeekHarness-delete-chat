@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, stat, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
+import { purgeRecycled } from './purge-bin.mjs'
 import {
+  DEFAULT_MODE,
   DeleteSessionError,
   deleteSession,
   findSessionDirs,
@@ -42,9 +45,13 @@ test('id 形状只接受宿主生成的 session- 前缀', () => {
   assert.equal(SESSION_ID_PATTERN.test('session-'), false)
 })
 
-test('默认模式把会话目录整块移入 session-trash，并清掉投影缓存', async () => {
+test('默认模式：Windows 进系统回收站，其它平台进 session-trash', () => {
+  assert.equal(DEFAULT_MODE, process.platform === 'win32' ? 'recycle' : 'trash')
+})
+
+test('trash 模式把会话目录整块移入 session-trash，并清掉投影缓存', async () => {
   const home = await fakeHome()
-  const result = await deleteSession({ home, sessionId: ID, now: FIXED_DATE })
+  const result = await deleteSession({ home, sessionId: ID, mode: 'trash', now: FIXED_DATE })
 
   assert.equal(result.mode, 'trash')
   assert.equal(result.alreadyGone, false)
@@ -72,10 +79,32 @@ test('permanent 模式直接删除目录，不进回收站', async () => {
   await rm(home, { recursive: true, force: true })
 })
 
+test('recycle 模式把整个会话目录交给 Windows 回收站', { skip: process.platform !== 'win32' }, async () => {
+  const home = await fakeHome()
+  // 每次运行都用新 id：回收站里不会和真实会话或上次运行的残留撞名。
+  const id = `session-${randomUUID()}`
+  await mkdir(join(home, 'sessions', SLOT, id), { recursive: true })
+  await writeFile(join(home, 'sessions', SLOT, id, 'session.v1.jsonl.zstd'), 'x')
+  try {
+    const result = await deleteSession({ home, sessionId: id, mode: 'recycle' })
+
+    assert.equal(result.mode, 'recycle')
+    assert.equal(result.alreadyGone, false)
+    assert.equal(result.removed[0].trashPath, undefined)
+    // 目录必须真的离开原位（回收站里由系统保管）。
+    await assert.rejects(stat(join(home, 'sessions', SLOT, id)), { code: 'ENOENT' })
+    // 同槽的另一个会话必须完好，槽目录因此不能被删掉。
+    assert.ok(await stat(join(home, 'sessions', SLOT, 'session-keepme')))
+  } finally {
+    await purgeRecycled(id)
+    await rm(home, { recursive: true, force: true })
+  }
+})
+
 test('重复删除是幂等的：alreadyGone 为 true，不抛错', async () => {
   const home = await fakeHome()
-  await deleteSession({ home, sessionId: ID, now: FIXED_DATE })
-  const again = await deleteSession({ home, sessionId: ID, now: FIXED_DATE })
+  await deleteSession({ home, sessionId: ID, mode: 'trash', now: FIXED_DATE })
+  const again = await deleteSession({ home, sessionId: ID, mode: 'trash', now: FIXED_DATE })
   assert.equal(again.alreadyGone, true)
   assert.deepEqual(again.removed, [])
   await rm(home, { recursive: true, force: true })
